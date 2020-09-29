@@ -7,12 +7,6 @@ var configuration = Argument("configuration", "Release");
 var buildNumber = Argument("buildNumber", "0");
 var buildDir = Directory("./artifacts");
 var binDir = buildDir + Directory("bin");
-var solution = "./src/DiabloInterface.sln";
-
-var testSolution = "./src/DiabloInterface.test";
-var testDir = Directory(testSolution + "/bin/" + configuration + "/");
-var testFile = testDir + File(@"DiabloInterface.test.dll");
-var testResultFile = testDir + File(@"TestResults.trx");
 
 var vsLatest = VSWhereLatest();
 var modernMSBuildPath = vsLatest + File(@"\MSBuild\15.0\Bin\MSBuild.exe");
@@ -21,23 +15,13 @@ if (!FileExists(modernMSBuildPath)) {
 }
 var modernMSTestPath = vsLatest + File(@"\Common7\IDE\MSTest.exe");
 
-Task("Clean")
+Task("Build")
     .Does(() =>
 {
     CleanDirectory(binDir);
-});
-
-Task("RestorePackages")
-    .IsDependentOn("Clean")
-    .Does(() =>
-{
+    
+    var solution = "./src/DiabloInterface.sln";
     NuGetRestore(solution);
-});
-
-Task("Build")
-    .IsDependentOn("RestorePackages")
-    .Does(() =>
-{
     MSBuild(solution, settings =>
     {
         if (FileExists(modernMSBuildPath))
@@ -50,7 +34,7 @@ Task("Build")
     });
 });
 
-Task("Package")
+Task("CopyBuilt")
     .IsDependentOn("Build")
     .Does(() =>
 {
@@ -63,52 +47,65 @@ Task("Package")
 
     Information("Copying from {0}", path);
     CopyFiles(files, binDir);
+});
 
+Task("CopyBuiltPlugins")
+    .IsDependentOn("Build")
+    .Does(() =>
+{
+    var pluginFiles = GetFiles("./src/DiabloInterface.Plugin.*/bin/" + configuration + "/*.dll")
+        .Where(x => !x.FullPath.Contains(".Test"));
+    var pluginDir = binDir + Directory("Plugins");
+    CreateDirectory(pluginDir);
+    CopyFiles(pluginFiles, pluginDir);
+});
+
+Task("Package")
+    .IsDependentOn("CopyBuilt")
+//    .IsDependentOn("CopyBuiltPlugins")
+    .Does(() =>
+{
     var assemblyInfo = ParseAssemblyInfo("./src/DiabloInterface/Properties/AssemblyInfo.cs");
     var fileName = string.Format("DiabloInterface-v{0}.zip", assemblyInfo.AssemblyInformationalVersion);
+    CreateDirectory(binDir + Directory("Libs"));
+    CreateDirectory(binDir + Directory("Plugins"));
+
+    MoveFiles("./artifacts/bin/DiabloInterface.Plugin.*.dll", binDir + Directory("Plugins"));
+    MoveFiles("./artifacts/bin/*.dll", binDir + Directory("Libs"));
     ZipCompress(binDir, buildDir + File(fileName));
 });
 
 Task("Default")
     .IsDependentOn("Package");
 
-
-Task("CleanTest")
-    .IsDependentOn("Build")
-    .Does(() =>
-{
-    CleanDirectory(testDir);
-});
-
-Task("BuildTest")
-    .IsDependentOn("CleanTest")
-    .Does(() =>
-{
-    MSBuild(testSolution, settings =>
-    {
-        if (FileExists(modernMSBuildPath))
-        {
-            settings.ToolPath = modernMSBuildPath;
-        }
-
-        settings.SetConfiguration(configuration);
-        settings.SetVerbosity(Verbosity.Minimal);
-    });
-});
-
 Task("Test")
-    .IsDependentOn("BuildTest")
+    .IsDependentOn("CopyBuilt")
     .Does(() =>
 {
-    if (FileExists(modernMSTestPath)) {
-        MSTest(testFile, new MSTestSettings() {
-            ToolPath = modernMSTestPath,
-            ResultsFile = testResultFile
+    foreach(var project in GetFiles("./src/*.Test/*.csproj"))
+    {
+        Information("Solution {0}", project);
+        var filename = project.GetFilenameWithoutExtension().ToString();
+        var testDir = Directory(project.GetDirectory().ToString() + "/bin/" + configuration + "/");
+        CleanDirectory(testDir);
+
+        CopyDirectory(binDir, testDir);
+
+        MSBuild(project, settings =>
+        {
+            if (FileExists(modernMSBuildPath))
+                settings.ToolPath = modernMSBuildPath;
+
+            settings.SetConfiguration(configuration);
+            settings.SetVerbosity(Verbosity.Minimal);
         });
-    } else {
-        MSTest(testFile, new MSTestSettings() {
-            ResultsFile = testResultFile
-        });
+
+        var s = new MSTestSettings();
+        s.ResultsFile = testDir + File(@"TestResults.trx");
+        if (FileExists(modernMSTestPath))
+            s.ToolPath = modernMSTestPath;
+
+        MSTest(testDir + File(filename + ".dll"), s);
     }
 });
 

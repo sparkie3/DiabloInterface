@@ -4,13 +4,14 @@ using System.Linq;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Reflection;
 using Zutatensuppe.D2Reader.Struct.Item;
 using Zutatensuppe.D2Reader.Struct.Item.Modifier;
 using Zutatensuppe.D2Reader.Struct.Stat;
 using Zutatensuppe.D2Reader.Struct.Skill;
 using Zutatensuppe.DiabloInterface.Core.Logging;
-using System.Reflection;
 using Zutatensuppe.D2Reader.Models;
+using Zutatensuppe.D2Reader.Struct.Monster;
 
 namespace Zutatensuppe.D2Reader.Readers
 {
@@ -30,7 +31,7 @@ namespace Zutatensuppe.D2Reader.Readers
         readonly ModifierTable rareModifiers;
 
         private IProcessMemoryReader reader;
-        private IStringLookupTable stringReader;
+        private IStringReader stringReader;
         private ISkillReader skillReader;
 
         readonly ushort[] opNestings;
@@ -38,7 +39,7 @@ namespace Zutatensuppe.D2Reader.Readers
         public UnitReader(
             IProcessMemoryReader reader,
             GameMemoryTable memory,
-            IStringLookupTable stringReader,
+            IStringReader stringReader,
             ISkillReader skillReader
         ) {
             this.reader = reader;
@@ -48,11 +49,11 @@ namespace Zutatensuppe.D2Reader.Readers
             cachedItemData = new Dictionary<IntPtr, D2ItemData>();
             cachedDescriptions = new Dictionary<int, D2ItemDescription>();
 
-            globals = reader.Read<D2GlobalData>(reader.ReadAddress32(memory.GlobalData, AddressingMode.Relative));
-            lowQualityTable = reader.Read<D2SafeArray>(memory.LowQualityItems, AddressingMode.Relative);
-            descriptionTable = reader.Read<D2SafeArray>(memory.ItemDescriptions, AddressingMode.Relative);
-            magicModifiers = reader.Read<ModifierTable>(memory.MagicModifierTable, AddressingMode.Relative);
-            rareModifiers = reader.Read<ModifierTable>(memory.RareModifierTable, AddressingMode.Relative);
+            globals = reader.Read<D2GlobalData>(reader.ReadAddress32(memory.GlobalData));
+            lowQualityTable = reader.Read<D2SafeArray>(memory.LowQualityItems);
+            descriptionTable = reader.Read<D2SafeArray>(memory.ItemDescriptions);
+            magicModifiers = reader.Read<ModifierTable>(memory.MagicModifierTable);
+            rareModifiers = reader.Read<ModifierTable>(memory.RareModifierTable);
             if (globals != null)
             {
                 opNestings = reader.ReadArray<ushort>(globals.OpStatNesting, (int)globals.OpStatNestingCount);
@@ -130,6 +131,12 @@ namespace Zutatensuppe.D2Reader.Readers
 
             cachedItemData[unit.UnitData] = itemData;
             return itemData;
+        }
+
+        public D2MonsterData GetMonsterData(D2Unit unit)
+        {
+            if (!unit.IsMonster() || unit.UnitData.IsNull) return null;
+            return reader.Read<D2MonsterData>(unit.UnitData);
         }
 
         private D2ItemDescription GetItemDescription(Item item)

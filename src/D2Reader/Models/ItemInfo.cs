@@ -1,9 +1,6 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
 using Zutatensuppe.D2Reader.Readers;
 using Zutatensuppe.D2Reader.Struct;
 using Zutatensuppe.D2Reader.Struct.Item;
@@ -33,7 +30,6 @@ namespace Zutatensuppe.D2Reader.Models
         public string ItemName { get; set; }
         public string ItemBaseName { get; set; }
         public string QualityColor { get; set; }
-        public string ImageId { get; set; }
         public List<string> Properties { get; set; }
         public BodyLocation Location { get; set; }
 
@@ -41,32 +37,23 @@ namespace Zutatensuppe.D2Reader.Models
         public string BaseItem { get; set; }
         public string Quality { get; set; }
 
-        public static List<ItemInfo> GetItemsByLocations(D2DataReader dataReader, List<BodyLocation> locations)
+        public ItemInfo()
         {
-            List<ItemInfo> Items = new List<ItemInfo>();
-            dataReader.ItemSlotAction(locations, (item, player, unitReader, stringReader, inventoryReader) => {
-                Items.Add(new ItemInfo(item, player, unitReader, stringReader, inventoryReader));
-            });
-            return Items;
         }
 
         public ItemInfo(
             Item item,
             D2Unit owner,
             UnitReader unitReader,
-            IStringLookupTable stringReader,
+            IStringReader stringReader,
             IInventoryReader inventoryReader
-        )
-        {
+        ) {
             Class = item.Unit.eClass;
             ItemName = unitReader.GetFullItemName(item);
             ItemBaseName = BaseItemName(item, unitReader);
             QualityColor = QualityColorDefault(item);
             Properties = unitReader.GetMagicalStrings(item, owner, inventoryReader);
             Location = item.ItemData.BodyLoc;
-
-            // TODO: fill with something useful
-            ImageId = "";
 
             // Backward compatibility for D2ID:
             // TODO: add Slug/Image/EnglishBaseName or something like that, D2ID currently uses ItemName/BaseItem for
@@ -84,6 +71,26 @@ namespace Zutatensuppe.D2Reader.Models
                 BaseItem = BaseItemNameFallback(item, unitReader);
                 Quality = QualityColorFallback(item);
             }
+        }
+
+        public static bool AreEqual(ItemInfo itemA, ItemInfo itemB)
+        {
+            if (itemA == null && itemB == null)
+            {
+                return true;
+            }
+
+            if (itemA == null || itemB == null)
+            {
+                return false;
+            }
+
+            return itemA.Class == itemB.Class
+                && itemA.ItemName == itemB.ItemName
+                && itemA.ItemBaseName == itemB.ItemBaseName
+                && itemA.QualityColor == itemB.QualityColor
+                && itemA.Location == itemB.Location
+                && itemA.Properties.SequenceEqual(itemB.Properties);
         }
 
         private string BaseItemName(Item item, UnitReader unitReader)

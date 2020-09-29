@@ -1,14 +1,12 @@
 namespace Zutatensuppe.DiabloInterface
 {
     using System;
-    using System.Reflection;
+    using System.Collections.Generic;
     using System.Windows.Forms;
-
-    using Zutatensuppe.DiabloInterface.Business.Services;
     using Zutatensuppe.DiabloInterface.Core.Logging;
     using Zutatensuppe.DiabloInterface.Framework;
     using Zutatensuppe.DiabloInterface.Gui;
-
+    using Zutatensuppe.DiabloInterface.Plugin;
     using static Framework.NetFrameworkVersionComparator;
 
     internal static class Program
@@ -22,9 +20,25 @@ namespace Zutatensuppe.DiabloInterface
                 return;
             }
 
-            InitializeLogger();
+            Log4NetLogger.Initialize();
 
-            RunApplication();
+            LogApplicationInfo();
+
+            var pluginTypes = new List<Type>
+            {
+                typeof(Plugin.Autosplits.Plugin),
+                typeof(Plugin.FileWriter.Plugin),
+                typeof(Plugin.HttpClient.Plugin),
+                typeof(Plugin.PipeServer.Plugin),
+                typeof(Plugin.Updater.Plugin),
+            };
+
+            using (var di = DiabloInterface.Create(pluginTypes))
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new MainWindow(di));
+            }
         }
 
         static void RegisterAppDomainExceptionLogging()
@@ -42,82 +56,25 @@ namespace Zutatensuppe.DiabloInterface
 
         static bool ShouldQuitWithoutProperDotNetFramework()
         {
-            if (IsFrameworkVersionSupported(NetFrameworkVersion.Version_4_5_2))
-            {
+            if (IsFrameworkVersionSupported(NetFrameworkVersion.Version_4_6_1))
                 return false;
-            }
 
             var versionName = NetFrameworkVersionExtension.FriendlyName(NewestFrameworkVersion);
-            var message = "It seems that you do not have the .NET Framework 4.5.2 or later installed.\n" +
-                          "Without the proper .NET Framework support the application is likely to crash.\n" +
-                          $"Your .NET Framework version is: {versionName}\n\n" +
-                          "Do you wish to try running the application anyway?";
+            var message = "It seems that you do not have the .NET Framework 4.6.1 or later installed.\n" +
+                "Without the proper .NET Framework support the application is likely to crash.\n" +
+                $"Your .NET Framework version is: {versionName}\n\n" +
+                "Do you wish to try running the application anyway?";
             var result = MessageBox.Show(message, @".NET Framework Error", MessageBoxButtons.YesNo);
             return result == DialogResult.No;
         }
-
-        static void InitializeLogger()
-        {
-            Log4NetLogger.Initialize();
-
-            LogApplicationInfo();
-        }
-
+        
         static void LogApplicationInfo()
         {
             var logger = LogServiceLocator.Get(typeof(Program));
             logger.Info($"Diablo Interface Version {Application.ProductVersion}");
             logger.Info($"Operating system: {Environment.OSVersion}");
-
             var versionName = NetFrameworkVersionExtension.FriendlyName(NewestFrameworkVersion);
             logger.Info($".NET Framework: {versionName}");
-        }
-
-        static void RunApplication()
-        {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-
-            using (var settingsService = CreateSettingsService())
-            using (var gameService = new GameService(settingsService))
-            {
-                CheckForApplicationUpdates(settingsService);
-
-                new CharacterStatFileWriterService(settingsService, gameService);
-                var keyService = new KeyService();
-                var autoSplitService = new AutoSplitService(settingsService, gameService, keyService);
-                var serverService = new ServerService(gameService, settingsService);
-                var httpClientService = new HttpClientService(gameService, settingsService);
-                var mainWindow = new MainWindow(
-                    settingsService,
-                    gameService,
-                    autoSplitService,
-                    keyService,
-                    serverService,
-                    httpClientService
-                );
-                Application.Run(mainWindow);
-
-                serverService.Stop();
-            }
-        }
-
-        static void CheckForApplicationUpdates(ISettingsService settingsService)
-        {
-            if (settingsService.CurrentSettings.CheckUpdates)
-            {
-                VersionChecker.AutomaticallyCheckForUpdate();
-            }
-        }
-
-        static SettingsService CreateSettingsService()
-        {
-            var appStorage = new ApplicationStorage();
-            var service = new SettingsService(appStorage);
-
-            service.LoadSettingsFromPreviousSession();
-
-            return service;
         }
     }
 }

@@ -1,17 +1,17 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Zutatensuppe.D2Reader.Readers;
+using Zutatensuppe.D2Reader.Struct;
+using Zutatensuppe.D2Reader.Struct.Skill;
+using Zutatensuppe.D2Reader.Struct.Stat;
+using Zutatensuppe.DiabloInterface.Core;
+using Zutatensuppe.DiabloInterface.Core.Logging;
+using static Zutatensuppe.D2Reader.D2Data;
+
 namespace Zutatensuppe.D2Reader.Models
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Linq;
-    using System.Reflection;
-    using Zutatensuppe.D2Reader.Readers;
-    using Zutatensuppe.D2Reader.Struct;
-    using Zutatensuppe.D2Reader.Struct.Item;
-    using Zutatensuppe.D2Reader.Struct.Skill;
-    using Zutatensuppe.D2Reader.Struct.Stat;
-    using Zutatensuppe.DiabloInterface.Core;
-    using Zutatensuppe.DiabloInterface.Core.Logging;
-
     public class Character
     {
         static readonly ILogger Logger = LogServiceLocator.Get(MethodBase.GetCurrentMethod().DeclaringType);
@@ -132,16 +132,18 @@ namespace Zutatensuppe.D2Reader.Models
 
         public string Name { get; set; }
 
+        public string Guid { get; set; }
+
         public CharacterClass CharClass { get; private set; }
 
-        public D2Data.Mode Mode { get; private set; }
+        public Mode Mode { get; private set; }
 
         public bool IsDead { get; private set; }
 
         public bool IsHardcore { get; internal set; }
         public bool IsExpansion { get; internal set; }
 
-        virtual public bool IsAutosplitChar { get; internal set; }
+        virtual public bool IsNewChar { get; internal set; }
 
         virtual public int Level { get; private set; }
         public int Experience { get; private set; }
@@ -172,20 +174,25 @@ namespace Zutatensuppe.D2Reader.Models
         public int Gold { get; private set; }
         public int GoldStash { get; private set; }
 
-        public short Deaths;
+        public int Life { get; private set; }
+        public int LifeMax { get; private set; }
+
+        public int Mana { get; private set; }
+        public int ManaMax { get; private set; }
+
+        public short Deaths = 0;
 
         public int Defense { get; private set; }
 
         public DateTime Created { get; set; }
 
         // TODO: use Item model for these:
-        virtual public Dictionary<BodyLocation, string> EquippedItemStrings { get; set; }
-        virtual public List<int> InventoryItemIds { get; set; }
-        
+        virtual public List<int> InventoryItemIds { get; internal set; }
+        public List<ItemInfo> Items { get; internal set; }
 
         public int RealFRW()
         {
-            return FasterRunWalk + ((VelocityPercent - (Mode == D2Data.Mode.RUN ? 50 : 0))-100);
+            return FasterRunWalk + ((VelocityPercent - (Mode == Mode.RUN ? 50 : 0))-100);
         }
 
         public int RealIAS()
@@ -193,18 +200,12 @@ namespace Zutatensuppe.D2Reader.Models
             return IncreasedAttackSpeed + (AttackRate - 100);
         }
 
-        internal void ParseStats(UnitReader unitReader, D2GameInfo gameInfo)
-        {
-            ParseStats(unitReader.GetStatsMap(gameInfo.Player), gameInfo);
-        }
-
-        /// <summary>
-        /// fill the player data by dictionary
-        /// </summary>
-        private void ParseStats(
-            Dictionary<StatIdentifier, D2Stat> data,
-            D2GameInfo gameInfo
+        internal void Parse(
+            UnitReader unitReader,
+            GameInfo gameInfo
         ) {
+            var data = unitReader.GetStatsMap(gameInfo.Player);
+
             CharClass = (CharacterClass)gameInfo.Player.eClass;
 
             int penalty = ResistancePenalty.GetPenaltyByGame(gameInfo.Game);
@@ -251,15 +252,21 @@ namespace Zutatensuppe.D2Reader.Models
 
             MagicFind = getStat(StatIdentifier.MagicFind);
             MonsterGold = getStat(StatIdentifier.MonsterGold);
+
+            Mana = getStat(StatIdentifier.Mana) >> 8;
+            ManaMax = getStat(StatIdentifier.ManaMax) >> 8;
+
+            Life = getStat(StatIdentifier.Hitpoints) >> 8;
+            LifeMax = getStat(StatIdentifier.HitpointsMax) >> 8;
         }
 
-        public void UpdateMode(D2Data.Mode mode)
+        public void UpdateMode(Mode mode)
         {
             Mode = mode;
 
             bool wasDead = IsDead;
 
-            IsDead = (Mode == D2Data.Mode.DEAD || Mode == D2Data.Mode.DEATH) && Level > 0;
+            IsDead = (Mode == Mode.DEAD || Mode == Mode.DEATH) && Level > 0;
 
             if (IsDead && !wasDead)
             {
@@ -267,21 +274,36 @@ namespace Zutatensuppe.D2Reader.Models
             }
         }
 
-        public static bool IsNewChar(
+        public static bool DetermineIfNewChar(
             D2Unit unit,
             UnitReader unitReader,
             IInventoryReader inventoryReader,
             ISkillReader skillReader
         ) {
-            return MatchesStartingProps(unit, unitReader)
-                && MatchesStartingItems(unit, inventoryReader)
-                && MatchesStartingSkills(unit, skillReader);
+            if (!MatchesStartingProps(unit, unitReader))
+            {
+                Logger.Info("Starting Props don't match");
+                return false;
+            }
+            if (!MatchesStartingItems(unit, inventoryReader))
+            {
+                Logger.Info("Starting Items don't match");
+                return false;
+            }
+            if (!MatchesStartingSkills(unit, skillReader))
+            {
+                Logger.Info("Starting Skills don't match");
+                return false;
+            }
+            return true;
         }
 
         private static bool MatchesStartingProps(D2Unit p, UnitReader unitReader)
         {
             // check -act2/3/4/5 level|xp
             int level = unitReader.GetStatValue(p, StatIdentifier.Level) ?? 0;
+            if (level == 0)
+                throw new Exception("Invalid level");
             int experience = unitReader.GetStatValue(p, StatIdentifier.Experience) ?? 0;
 
             // first we will check the level and XP

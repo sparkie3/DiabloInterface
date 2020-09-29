@@ -9,25 +9,27 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
 
     using Zutatensuppe.D2Reader;
     using Zutatensuppe.D2Reader.Models;
-    using Zutatensuppe.DiabloInterface.Business.Services;
-    using Zutatensuppe.DiabloInterface.Business.Settings;
     using Zutatensuppe.DiabloInterface.Core.Extensions;
     using Zutatensuppe.DiabloInterface.Core.Logging;
+    using Zutatensuppe.DiabloInterface.Lib;
+    using Zutatensuppe.DiabloInterface.Lib.Services;
 
     class Def
     {
         public string name;
         public string maxString;
-        public Func<ApplicationSettings, Tuple<bool, Color, int>> settings;
+        public Func<ApplicationConfig, Tuple<bool, Color, int>> settings;
         public Label[] labels;
         public Dictionary<Label, string> defaults;
-        public Def(string name, string maxString, Func<ApplicationSettings, Tuple<bool, Color, int>> settings, string[] labels)
+        public bool enabled;
+        public Def(string name, string maxString, Func<ApplicationConfig, Tuple<bool, Color, int>> settings, string[] labels)
         {
             this.name = name;
             this.maxString = maxString;
             this.settings = settings;
             this.labels = (from n in labels select new Label() { Text = n }).ToArray();
             this.defaults = new Dictionary<Label, string>();
+            this.enabled = false;
             foreach (Label l in this.labels)
             {
                 this.defaults.Add(l, l.Text);
@@ -39,8 +41,7 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
     {
         static readonly ILogger Logger = LogServiceLocator.Get(MethodBase.GetCurrentMethod().DeclaringType);
 
-        protected ISettingsService settingsService;
-        protected IGameService gameService;
+        protected DiabloInterface di;
 
         protected Dictionary<string, Def> def = new Dictionary<string, Def>();
 
@@ -52,40 +53,88 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
 
         protected abstract Panel RuneLayoutPanel { get; }
 
-        protected void Add(string nam, string maxStr, Func<ApplicationSettings, Tuple<bool, Color, int>> s, params string[] names)
+        protected void Add(
+            string nam,
+            string maxStr,
+            Func<ApplicationConfig, Tuple<bool, Color, int>> s,
+            params string[] names
+        )
         {
             def.Add(nam, new Def(nam, maxStr, s, names));
         }
 
-        protected void UpdateLabel(string nam, string value)
+        protected Font CreateFont(string name, int size)
         {
+            try
+            {
+                return new Font(name, size);
+            }
+            catch
+            {
+                return new Font(DefaultFont.FontFamily.Name, size);
+            }
+        }
+
+        public static string ReplaceFirst(string text, string search, string replace)
+        {
+            int pos = text.IndexOf(search);
+            if (pos < 0)
+                return text;
+            return text.Substring(0, pos) + replace + text.Substring(pos + search.Length);
+        }
+
+        protected void UpdateLabel(string nam, string[] values, bool visible = true)
+        {
+            if (!def[nam].enabled)
+                return;
+
             foreach (Label l in def[nam].labels)
             {
+                l.Visible = visible;
+                var text = def[nam].defaults[l];
+                foreach (var value in values)
+                {
+                    text = ReplaceFirst(text, "{}", value);
+                }
+                l.Text = text;
+            }
+        }
+
+        protected void UpdateLabel(string nam, string value, bool visible = true)
+        {
+            if (!def[nam].enabled)
+                return;
+
+            foreach (Label l in def[nam].labels)
+            {
+                l.Visible = visible;
                 l.Text = def[nam].defaults[l].Replace("{}", value);
             }
         }
 
-        protected void UpdateLabel(string nam, int value)
+        protected void UpdateLabel(string nam, int value, bool visible = true)
         {
-            UpdateLabel(nam, "" + value);
+            UpdateLabel(nam, "" + value, visible);
+        }
+
+        protected void UpdateLabel(string nam, uint value, bool visible = true)
+        {
+            UpdateLabel(nam, "" + value, visible);
         }
 
         protected void RegisterServiceEventHandlers()
         {
-            settingsService.SettingsChanged += SettingsServiceOnSettingsChanged;
-            gameService.CharacterCreated += GameServiceOnCharacterCreated;
-            gameService.DataRead += GameServiceOnDataRead;
+            di.configService.Changed += SettingsServiceOnSettingsChanged;
+            di.game.DataRead += GameServiceOnDataRead;
         }
 
         protected void UnregisterServiceEventHandlers()
         {
-            settingsService.SettingsChanged -= SettingsServiceOnSettingsChanged;
-
-            gameService.CharacterCreated -= GameServiceOnCharacterCreated;
-            gameService.DataRead -= GameServiceOnDataRead;
+            di.configService.Changed -= SettingsServiceOnSettingsChanged;
+            di.game.DataRead -= GameServiceOnDataRead;
         }
 
-        void SettingsServiceOnSettingsChanged(object sender, ApplicationSettingsEventArgs e)
+        void SettingsServiceOnSettingsChanged(object sender, ApplicationConfigEventArgs e)
         {
             if (InvokeRequired)
             {
@@ -95,26 +144,23 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
 
             activeCharacterClass = null;
 
-            UpdateSettings(e.Settings);
+            UpdateConfig(e.Config);
         }
 
-        void GameServiceOnCharacterCreated(object sender, CharacterCreatedEventArgs e)
-        {
-            if (InvokeRequired)
-            {
-                Invoke((Action)(() => GameServiceOnCharacterCreated(sender, e)));
-                return;
-            }
-
-            Reset();
-        }
-
+        string lastGuid;
         void GameServiceOnDataRead(object sender, DataReadEventArgs e)
         {
             if (InvokeRequired)
             {
                 Invoke((Action)(() => GameServiceOnDataRead(sender, e)));
                 return;
+            }
+
+            if (lastGuid != e.Character.Guid)
+            {
+                Reset();
+
+                lastGuid = e.Character.Guid;
             }
 
             UpdateLabels(e.Character, e.Quests, e.Game);
@@ -144,16 +190,16 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
             }
         }
 
-        abstract protected void UpdateSettings(ApplicationSettings settings);
+        abstract protected void UpdateConfig(ApplicationConfig config);
 
         abstract protected void UpdateLabels(Character player, Quests quests, Game game);
 
         void UpdateClassRuneList(CharacterClass characterClass)
         {
-            var settings = settingsService.CurrentSettings;
-            if (!settings.DisplayRunes) return;
+            var config = di.configService.CurrentConfig;
+            if (!config.DisplayRunes) return;
 
-            var targetDifficulty = gameService.TargetDifficulty;
+            var targetDifficulty = di.game.TargetDifficulty;
             var isCharacterClassChanged = activeCharacterClass == null || activeCharacterClass != characterClass;
             var isGameDifficultyChanged = activeDifficulty != targetDifficulty;
 
@@ -163,13 +209,13 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
             Logger.Info("Loading rune list.");
             
             var runeSettings = GetMostSpecificRuneSettings(characterClass, targetDifficulty);
-            UpdateRuneList(settings, runeSettings?.Runes?.ToList());
+            UpdateRuneList(config, runeSettings?.Runes?.ToList());
 
             activeDifficulty = targetDifficulty;
             activeCharacterClass = characterClass;
         }
 
-        void UpdateRuneList(ApplicationSettings settings, IReadOnlyList<Rune> runes)
+        void UpdateRuneList(ApplicationConfig config, IReadOnlyList<Rune> runes)
         {
             var panel = RuneLayoutPanel;
             if (panel == null) return;
@@ -177,7 +223,7 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
             panel.Controls.ClearAndDispose();
             panel.Visible = runes?.Count > 0;
             runes?.ForEach(rune => panel.Controls.Add(
-                new RuneDisplayElement(rune, settings.DisplayRunesHighContrast, false, false)));
+                new RuneDisplayElement(rune, config.DisplayRunesHighContrast, false, false)));
         }
 
         /// <summary>
@@ -187,9 +233,9 @@ namespace Zutatensuppe.DiabloInterface.Gui.Controls
         /// <param name="characterClass">Active character class.</param>
         /// <param name="targetDifficulty">Manual difficulty selection.</param>
         /// <returns>The rune settings.</returns>
-        ClassRuneSettings GetMostSpecificRuneSettings(CharacterClass characterClass, GameDifficulty targetDifficulty)
+        IClassRuneSettings GetMostSpecificRuneSettings(CharacterClass characterClass, GameDifficulty targetDifficulty)
         {
-            IEnumerable<ClassRuneSettings> runeClassSettings = settingsService.CurrentSettings.ClassRunes.ToList();
+            IEnumerable<IClassRuneSettings> runeClassSettings = di.configService.CurrentConfig.ClassRunes.ToList();
             return runeClassSettings.FirstOrDefault(rs => rs.Class == characterClass && rs.Difficulty == targetDifficulty)
                 ?? runeClassSettings.FirstOrDefault(rs => rs.Class == characterClass && rs.Difficulty == null)
                 ?? runeClassSettings.FirstOrDefault(rs => rs.Class == null && rs.Difficulty == targetDifficulty)

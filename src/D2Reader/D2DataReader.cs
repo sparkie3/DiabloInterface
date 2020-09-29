@@ -1,43 +1,28 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Zutatensuppe.D2Reader.Models;
+using Zutatensuppe.D2Reader.Readers;
+using Zutatensuppe.D2Reader.Struct;
+using Zutatensuppe.D2Reader.Struct.Unknown;
+using Zutatensuppe.DiabloInterface.Core.Logging;
+using static Zutatensuppe.D2Reader.D2Data;
+
 namespace Zutatensuppe.D2Reader
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Linq;
-    using System.Reflection;
-    using System.Text;
-    using System.Threading;
-
-    using Zutatensuppe.D2Reader.Models;
-    using Zutatensuppe.D2Reader.Readers;
-    using Zutatensuppe.D2Reader.Struct;
-    using Zutatensuppe.D2Reader.Struct.Item;
-    using Zutatensuppe.D2Reader.Struct.Stat;
-    using Zutatensuppe.DiabloInterface.Core.Logging;
-
-    public class CharacterCreatedEventArgs : EventArgs
-    {
-        public CharacterCreatedEventArgs(Character character)
-        {
-            Character = character;
-        }
-
-        public Character Character { get; }
-    }
-
     public class DataReadEventArgs : EventArgs
     {
-        public DataReadEventArgs(
-            Character character,
-            Game game,
-            Quests quests
-        ) {
-            Character = character;
+        public DataReadEventArgs(Game game) {
+            Character = game.Character;
             Game = game;
-            Quests = quests;
+            Quests = game.Quests;
         }
 
-        public Character Character { get; }
         public Game Game { get; }
+        public Character Character { get; }
         public Quests Quests { get; }
     }
 
@@ -63,10 +48,11 @@ namespace Zutatensuppe.D2Reader
         IProcessMemoryReader reader;
         IInventoryReader inventoryReader;
         UnitReader unitReader;
-        IStringLookupTable stringReader;
+        IStringReader stringReader;
         ISkillReader skillReader;
         GameMemoryTable memory;
 
+        // set to true when d2 was running but no game is running
         bool wasInTitleScreen;
 
         private uint lastGameId = 0;
@@ -74,9 +60,7 @@ namespace Zutatensuppe.D2Reader
 
         private uint charCount = 0;
 
-        public Quests Quests { get; private set; } = new Quests();
         public Game Game { get; private set; }
-        public GameDifficulty Difficulty { get; private set; }
 
         public D2DataReader(
             IGameMemoryTableFactory memoryTableFactory,
@@ -92,18 +76,10 @@ namespace Zutatensuppe.D2Reader
             Dispose(false);
         }
 
-        public event EventHandler<CharacterCreatedEventArgs> CharacterCreated;
-
         public event EventHandler<DataReadEventArgs> DataRead;
-        
-        public Character ActiveCharacter { get; private set; }
 
-        public Character CurrentCharacter { get; private set; }
-
-        /// <summary>
-        /// Gets or sets reader polling rate.
-        /// </summary>
-        public TimeSpan PollingRate { get; set; } = TimeSpan.FromMilliseconds(500);
+        static TimeSpan POLLING_RATE_OUT_OF_GAME = TimeSpan.FromMilliseconds(50);
+        static TimeSpan POLLING_RATE_INGAME = TimeSpan.FromMilliseconds(500);
 
         bool IsProcessReaderTerminated => reader != null && !reader.IsValid;
 
@@ -161,10 +137,14 @@ namespace Zutatensuppe.D2Reader
             {
                 try
                 {
-                    reader = new ProcessMemoryReader(desc.ProcessName, desc.ModuleName, desc.SubModules);
+                    reader = ProcessMemoryReader.Create(desc.ProcessName, desc.ModuleName, desc.SubModules);
                     memory = CreateGameMemoryTableForReader(reader);
                 }
                 catch (ProcessNotFoundException)
+                {
+                    CleanUpDataReaders();
+                }
+                catch (ModuleNotLoadedException)
                 {
                     CleanUpDataReaders();
                 }
@@ -221,7 +201,7 @@ namespace Zutatensuppe.D2Reader
 
         void CreateReaders()
         {
-            stringReader = new StringLookupTable(reader, memory);
+            stringReader = new StringReader(reader, memory);
             skillReader = new SkillReader(reader, memory);
 
             // note: readers need to be recreated everytime before read.. at least unitReader
@@ -239,39 +219,6 @@ namespace Zutatensuppe.D2Reader
             return inventoryReader.Filter(inventory, filter);
         }
 
-        Dictionary<BodyLocation, string> ReadEquippedItemStrings(D2Unit owner)
-        {
-            var itemStrings = new Dictionary<BodyLocation, string>();
-            foreach (Item item in GetEquippedItems(owner))
-            {
-                // TODO: check why this get stats call is needed here
-                List<D2Stat> itemStats = unitReader.GetStats(item.Unit);
-                if (itemStats.Count == 0) continue;
-
-                if (!itemStrings.ContainsKey(item.BodyLocation()))
-                {
-                    itemStrings.Add(item.BodyLocation(), ReadEquippedItemString(item, owner));
-                }
-            }
-            return itemStrings;
-        }
-
-        private string ReadEquippedItemString(Item item, D2Unit owner)
-        {
-            StringBuilder s = new StringBuilder();
-            s.Append(unitReader.GetFullItemName(item));
-            s.Append(Environment.NewLine);
-
-            List<string> magicalStrings = unitReader.GetMagicalStrings(item, owner, inventoryReader);
-            foreach (string str in magicalStrings)
-            {
-                s.Append("    ");
-                s.Append(str);
-                s.Append(Environment.NewLine);
-            }
-            return s.ToString();
-        }
-
         private List<int> ReadInventoryItemIds(D2Unit owner)
         {
             if (owner == null)
@@ -283,79 +230,82 @@ namespace Zutatensuppe.D2Reader
             return (from item in allItems select item.Unit.eClass).ToList();
         }
 
-        private IEnumerable<Item> GetEquippedItems(D2Unit owner)
-        {
-            return GetInventoryItemsFiltered(owner, (Item i) => i.IsEquipped());
-        }
-
-        private IEnumerable<Item> GetItemsEquippedInSlot(D2Unit owner, List<BodyLocation> slots)
-        {
-            return GetInventoryItemsFiltered(owner, (Item i) => slots.FindIndex(x => i.IsEquippedInSlot(x)) >= 0);
-        }
-
-        public void ItemSlotAction(List<BodyLocation> slots, Action<Item, D2Unit, UnitReader, IStringLookupTable, IInventoryReader> action)
-        {
-            if (!ValidateGameDataReaders()) return;
-
-            var gameInfo = ReadGameInfo();
-            if (gameInfo == null) return;
-
-            try
-            {
-                foreach (Item item in GetItemsEquippedInSlot(gameInfo.Player, slots))
-                {
-                    action?.Invoke(item, gameInfo.Player, unitReader, stringReader, inventoryReader);
-                }
-            } catch (Exception e)
-            {
-                string s = String.Join(",", from slot in slots select slot.ToString());
-                Logger.Error($"Unable to execute ItemSlotAction. {s}", e);
-                
-                unitReader.ResetCache();
-            }
-        }
-
         public void RunReadOperation()
         {
             while (!isDisposed)
             {
-                Thread.Sleep(PollingRate);
-
-                // "Block" here until we have a valid reader.
-                if (!ValidateGameDataReaders())
+                if (Read())
                 {
-                    continue;
-                }
-
-                try
-                {
-                    ProcessGameData();
-                }
-                catch (ThreadAbortException)
-                {
-                    Logger.Debug("ThreadAbortException");
-                    throw;
-                }
-                catch (Exception e)
-                {
-                    Logger.Debug("Other Exception");
-#if DEBUG
-                    // Print errors to console in debug builds.
-                    Console.WriteLine("Exception: {0}", e);
-#endif
-                    // cleaning up readers, so they are recreated in next loop
-                    // otherwise data reading will stop here
-                    CleanUpDataReaders();
+                    wasInTitleScreen = false;
+                    Thread.Sleep(POLLING_RATE_INGAME);
+                } else { 
+                    wasInTitleScreen = true;
+                    Thread.Sleep(POLLING_RATE_OUT_OF_GAME);
                 }
             }
         }
 
-        D2GameInfo ReadGameInfo()
+        private bool Read()
+        {
+            // "Block" here until we have a valid reader.
+            if (!ValidateGameDataReaders())
+            {
+                return false;
+            }
+
+            try
+            {
+                return ProcessGameData();
+            }
+            catch (ThreadAbortException)
+            {
+                Logger.Debug("ThreadAbortException");
+                throw;
+            }
+            catch (Exception e)
+            {
+                Logger.Debug("Other Exception", e);
+#if DEBUG
+                // Print errors to console in debug builds.
+                Console.WriteLine("Exception: {0}", e);
+#endif
+                // cleaning up readers, so they are recreated in next loop
+                // otherwise data reading will stop here
+                CleanUpDataReaders();
+            }
+            return false;
+        }
+
+        GameInfo ReadGameInfo()
         {
             try
             {
-                D2Game game = ReadActiveGameInstance();
-                if (game == null || game.Client.IsNull) return null;
+                // if game is still loading, dont read further
+                var loading = reader.ReadInt32(memory.Loading);
+                if (loading != 0)
+                {
+                    Logger.Info("Game still loading");
+                    return null;
+                }
+
+                uint gameId = reader.ReadUInt32(memory.GameId);
+                IntPtr worldPointer = reader.ReadAddress32(memory.World);
+
+                // Get world if game is loaded.
+                if (worldPointer == IntPtr.Zero) return null;
+                D2World world = reader.Read<D2World>(worldPointer);
+
+                // Find the game address.
+                uint gameIndex = gameId & world.GameMask;
+                uint gameOffset = (gameIndex * 0x0C) + 0x08;
+                IntPtr gamePointer = reader.ReadAddress32(world.GameBuffer + gameOffset);
+
+                // Check for invalid pointers, this value can actually be negative during transition
+                // screens, so we need to reinterpret the pointer as a signed integer.
+                if (unchecked((int)gamePointer.ToInt64()) < 0) return null;
+
+                var game = reader.Read<D2Game>(gamePointer);
+                if (game.Client.IsNull) return null;
 
                 D2Client client = reader.Read<D2Client>(game.Client);
                 // Make sure we are reading a player type.
@@ -367,21 +317,17 @@ namespace Zutatensuppe.D2Reader
                 //       the adresses may be same at the beginning but change if you make a rune word
 
                 // player address for reading the actual player unit (for inventory, skills, etc.)
-                if ((long)memory.PlayerUnit <= 0) return null;
-                IntPtr playerAddress = reader.ReadAddress32(memory.PlayerUnit, AddressingMode.Relative);
+                IntPtr playerAddress = reader.ReadAddress32(memory.PlayerUnit);
                 if ((long)playerAddress <= 0) return null;
+
                 D2Unit player = reader.Read<D2Unit>(playerAddress);
 
                 // player address for reading the player (name + quests)
-                DataPointer unitAddress = game.UnitLists[0][client.UnitId & 0x7F];
-                if (unitAddress.IsNull) return null;
-                // Read player with player data.
-                var tmpPlayer = reader.Read<D2Unit>(unitAddress);
-                var playerData = tmpPlayer.UnitData.IsNull
+                var tmpPlayer = UnitByTypeAndGuid(game, D2UnitType.Player, client.UnitId);
+                var playerData = (tmpPlayer == null || tmpPlayer.UnitData.IsNull)
                     ? null
                     : reader.Read<D2PlayerData>(tmpPlayer.UnitData);
-
-                return new D2GameInfo(game, client, player, playerData);
+                return new GameInfo(game, gameId, client, player, playerData);
             }
             catch (ProcessMemoryReadException)
             {
@@ -389,27 +335,122 @@ namespace Zutatensuppe.D2Reader
             }
         }
 
-        D2Game ReadActiveGameInstance()
+        // 1.14d: game.478F20
+        // 1.13c: in D2Client.QueryInterface+F2B0
+        private int GetPetGuid(D2Unit owner, int eClass, int unknown = 0)
         {
-            uint gameId = reader.ReadUInt32(memory.GameId, AddressingMode.Relative);
-            IntPtr worldPointer = reader.ReadAddress32(memory.World, AddressingMode.Relative);
+            IntPtr addr = reader.ReadAddress32(memory.Pets);
+            if ((long)addr == 0) return -1;
 
-            // Get world if game is loaded.
-            if (worldPointer == IntPtr.Zero) return null;
-            D2World world = reader.Read<D2World>(worldPointer);
+            D2UnknownUnitStruct u;
+            do
+            {
+                u = reader.Read<D2UnknownUnitStruct>(addr);
+                if (u == null) return -1;
 
-            // Find the game address.
-            uint gameIndex = gameId & world.GameMask;
-            uint gameOffset = (gameIndex * 0x0C) + 0x08;
-            IntPtr gamePointer = reader.ReadAddress32(world.GameBuffer + gameOffset);
+                if (
+                    u.eClass == eClass
+                    && u.OwnerGUID == owner.GUID
+                    && (unknown != 0 || u.unknown_20 == unknown)
+                )
+                {
+                    return u.GUID;
+                }
 
-            // Check for invalid pointers, this value can actually be negative during transition
-            // screens, so we need to reinterpret the pointer as a signed integer.
-            if (unchecked((int)gamePointer.ToInt64()) < 0)
-                return null;
+                addr = u.pNext;
+            } while ((long)addr != 0);
+            return -1;
+        }
 
+        // get unit from the global unit list
+        private D2Unit UnitByTypeAndGuid(D2UnitType type, int guid)
+        {
+            if (memory.Units114 != null)
+            {
+                // 1.14
+                // for 1.14d see around game.463940
+                int size = Marshal.SizeOf(typeof(D2GameUnitList));
+                var addr = (IntPtr)memory.Units114 + (int)type * size;
+                var list = reader.Read<D2GameUnitList>(addr);
+                DataPointer unitAddress = list[guid & 0x7F];
+                return UnitByGuid(unitAddress, guid);
+            }
 
-            // TODO: move this out of this function
+            if (memory.Units113 != null)
+            {
+                // 1.13
+                // for 1.13d see function D2Client.dll+89CE0
+                // for 1.13c see function around D2Client.QueryInterface+FB14
+                var unitAddrPointer = (IntPtr)memory.Units113 + (int)(guid & 0x7F) * 4;
+                var addr = reader.ReadAddress32(unitAddrPointer);
+                return UnitByGuid(addr, guid);
+            }
+
+            return null;
+        }
+
+        // 1.14d: see game.552F60
+        // get unit from the game unit list
+        private D2Unit UnitByTypeAndGuid(D2Game game, D2UnitType type, int guid)
+        {
+            DataPointer unitAddress = game.UnitLists[(int)type][guid & 0x7F];
+            return UnitByGuid(unitAddress, guid);
+        }
+
+        private D2Unit UnitByGuid(IntPtr unitAddress, int guid)
+        {
+            if ((long)unitAddress == 0) return null;
+
+            var unit = reader.Read<D2Unit>(unitAddress);
+            while (unit != null)
+            {
+                // note: d2 also checks the type of unit and if it doesnt
+                //       match it goes to some error
+                if (unit.GUID == guid)
+                    return unit;
+
+                if (unit.pPrevUnit.IsNull) return null;
+                unit = reader.Read<D2Unit>(unit.pPrevUnit);
+            };
+            return null;
+        }
+
+        bool ProcessGameData()
+        {
+            // Make sure the game is loaded.
+            var gameInfo = ReadGameInfo();
+            if (gameInfo == null)
+                return false;
+
+            CreateReaders();
+
+            // A brand new character has been started.
+            // The extra wasInTitleScreen check prevents DI from splitting
+            // when it was started AFTER Diablo 2, but the char is still a new char
+            var isNewChar = false;
+            try
+            {
+                isNewChar = wasInTitleScreen && Character.DetermineIfNewChar(
+                    gameInfo.Player,
+                    unitReader,
+                    inventoryReader,
+                    skillReader
+                );
+            } catch (Exception e)
+            {
+                Logger.Info($"Unable to determine if new char {e.Message}");
+                return false;
+            }
+
+            var area = reader.ReadByte(memory.Area);
+
+            // Make sure game is in a valid state.
+            if (!IsValidState(isNewChar, gameInfo, area))
+            {
+                Logger.Info("Not in valid state");
+                return false;
+            }
+
             // TODO: fix bug with not increasing gameCount (maybe use some more info from D2Game obj)
             // Note: gameId can be the same across D2 restarts
             // - launch d2
@@ -417,51 +458,69 @@ namespace Zutatensuppe.D2Reader
             // - close d2
             // - launch d2
             // - start game (counter doesnt increase)
-            if (gameId != 0 && (lastGameId != gameId))
+            if (gameInfo.GameId != 0 && (lastGameId != gameInfo.GameId))
             {
                 gameCount++;
-                lastGameId = gameId;
+                lastGameId = gameInfo.GameId;
             }
 
-            return reader.Read<D2Game>(gamePointer);
-        }
-
-        void ProcessGameData()
-        {
-            // Make sure the game is loaded.
-            var gameInfo = ReadGameInfo();
-            if (gameInfo == null)
+            var character = ReadCharacterData(gameInfo, isNewChar);
+            var quests = ReadQuests(gameInfo);
+            Hireling hireling = null;
+            try
             {
-                wasInTitleScreen = true;
-                return;
+                hireling = ReadHirelingData(gameInfo);
+            } catch (Exception e)
+            {
+                Logger.Error("Error reading hireling", e);
             }
 
-            CreateReaders();
+            if (isNewChar)
+            {
+                charCount++;
+                Logger.Info($"A new chararacter was created: {character.Name} (Char {charCount})");
+            }
 
-            CurrentCharacter = ReadCharacterData(gameInfo);
-
-            Quests = ReadQuests(gameInfo);
-            Game = ReadGameData(gameInfo);
-            Difficulty = Game.Difficulty;
-            OnDataRead(new DataReadEventArgs(
-                CurrentCharacter,
-                Game,
-                Quests
-            ));
-        }
-
-        Game ReadGameData(D2GameInfo gameInfo)
-        {
             var g = new Game();
-            g.Area = reader.ReadByte(memory.Area, AddressingMode.Relative);
-            g.PlayersX = Math.Max(reader.ReadByte(memory.PlayersX, AddressingMode.Relative), (byte)1);
+            g.Area = area;
+            g.InventoryTab = reader.ReadByte(memory.InventoryTab);
+            g.PlayersX = Math.Max(reader.ReadByte(memory.PlayersX), (byte)1);
             g.Difficulty = (GameDifficulty)gameInfo.Game.Difficulty;
+            g.Seed = gameInfo.Game.InitSeed;
+            // todo: maybe improve the check, if needed...
+            g.SeedIsArg = reader.CommandLineArgs.Contains("-seed");
             g.GameCount = gameCount;
             g.CharCount = charCount;
-            return g;
+            g.Quests = quests;
+            g.Character = character;
+            g.Hireling = hireling;
+            Game = g;
+
+            OnDataRead(new DataReadEventArgs(Game));
+
+            return true;
         }
 
-        Quests ReadQuests(D2GameInfo gameInfo) => new Quests((
+        bool IsValidState(bool isNewChar, GameInfo gameInfo, byte area)
+        {
+            // we assume that for non new chars, game state is always valid for reading (for now)
+            if (!isNewChar)
+                return true;
+
+            // When a new player is created, the game area is not updated immediately.
+            // That means the game is in a kind of invalid state.
+            switch (gameInfo.Player.actNo)
+            {
+                case 0: return area == (byte)Area.ROGUE_ENCAMPMENT;
+                case 1: return area == (byte)Area.LUT_GHOLEIN;
+                case 2: return area == (byte)Area.KURAST_DOCKTOWN; 
+                case 3: return area == (byte)Area.PANDEMONIUM_FORTRESS; 
+                case 4: return area == (byte)Area.HARROGATH; 
+                default: return false;
+            }
+        }
+
+        Quests ReadQuests(GameInfo gameInfo) => new Quests((
             from address in gameInfo.PlayerData.Quests
             where !address.IsNull
             select ReadQuestBuffer(address) into questBuffer
@@ -482,41 +541,29 @@ namespace Zutatensuppe.D2Reader
         static List<Quest> TransformToQuestList(IEnumerable<ushort> questBuffer) => questBuffer
             .Select((data, index) => QuestFactory.CreateFromBufferIndex(index, data))
             .Where(quest => quest != null).ToList();
-
-        Character CharacterByName(string name)
+        
+        Character ReadCharacterData(GameInfo gameInfo, bool isNewChar)
         {
-            if (!characters.ContainsKey(name))
-                characters[name] = new Character { Name = name, Created = DateTime.Now };
-            return characters[name];
-        }
+            var name = gameInfo.PlayerData.PlayerName;
 
-        Character ReadCharacterData(D2GameInfo gameInfo)
-        {
-            Character character = CharacterByName(gameInfo.PlayerData.PlayerName);
-
-            if (wasInTitleScreen)
+            if (isNewChar)
             {
-                // A brand new character has been started.
-                // The extra wasInTitleScreen check prevents DI from splitting
-                // when it was started AFTER Diablo 2, but the char is still a new char
-                if (Character.IsNewChar(gameInfo.Player, unitReader, inventoryReader, skillReader))
-                {
-                    // disable IsAutosplitChar from the other chars created so far
-                    foreach (var pair in characters)
-                        pair.Value.IsAutosplitChar = false;
-
-                    Logger.Info($"A new chararacter was created: {character.Name}");
-                    charCount++;
-                    character.Deaths = 0;
-                    character.IsAutosplitChar = true;
-                    ActiveCharacter = character;
-                    OnCharacterCreated(new CharacterCreatedEventArgs(character));
-                }
-
-                // Not in title screen anymore.
-                wasInTitleScreen = false;
+                // disable IsNewChar from the other chars created so far
+                foreach (var pair in characters)
+                    pair.Value.IsNewChar = false;
             }
 
+            if (isNewChar || !characters.ContainsKey(name))
+            {
+                characters[name] = new Character {
+                    Name = name,
+                    Created = DateTime.Now,
+                    Guid = Guid.NewGuid().ToString(),
+                    IsNewChar = isNewChar,
+                };
+            }
+
+            Character character = characters[name];
             character.UpdateMode((D2Data.Mode)gameInfo.Player.eMode);
             character.IsHardcore = gameInfo.Client.IsHardcore();
             character.IsExpansion = gameInfo.Client.IsExpansion();
@@ -524,16 +571,39 @@ namespace Zutatensuppe.D2Reader
             // Don't update stats and items while dead.
             if (!character.IsDead)
             {
-                character.ParseStats(unitReader, gameInfo);
-                character.EquippedItemStrings = ReadEquippedItemStrings(gameInfo.Player);
+                character.Parse(unitReader, gameInfo);
                 character.InventoryItemIds = ReadInventoryItemIds(gameInfo.Player);
+                character.Items = GetItemInfosByItems(GetEquippedItems(gameInfo.Player), gameInfo.Player);
             }
 
             return character;
         }
 
-        protected virtual void OnCharacterCreated(CharacterCreatedEventArgs e) =>
-            CharacterCreated?.Invoke(this, e);
+        Hireling ReadHirelingData(GameInfo gameInfo)
+        {
+            var guid = GetPetGuid(gameInfo.Player, (int)PetClass.HIRELING);
+            if (guid < 0) return null;
+
+            var unit = UnitByTypeAndGuid(D2UnitType.Monster, guid);
+            if (unit == null) return null;
+
+            var hireling = new Hireling();
+            hireling.Parse(unit, unitReader, skillReader, reader, gameInfo);
+            hireling.Items = GetItemInfosByItems(GetEquippedItems(unit), unit);
+            return hireling;
+        }
+
+        private IEnumerable<Item> GetEquippedItems(D2Unit owner)
+        {
+            return GetInventoryItemsFiltered(owner, (Item i) => i.IsEquipped());
+        }
+
+        private List<ItemInfo> GetItemInfosByItems(IEnumerable<Item> items, D2Unit owner)
+        {
+            return items
+                .Select(item => new ItemInfo(item, owner, unitReader, stringReader, inventoryReader))
+                .ToList();
+        }
 
         protected virtual void OnDataRead(DataReadEventArgs e) =>
             DataRead?.Invoke(this, e);
